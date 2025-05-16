@@ -1,0 +1,5 @@
+figures/*.png
+submission/
+world_model/
+*__pycache__*
+*.pyc
