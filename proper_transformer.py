@@ -36,8 +36,16 @@ class TimeSeriesTransformer(nn.Module):
         self.dim_model = dim_model
         
         # Input embedding
-        self.input_embedding = nn.Linear(input_dim, dim_model).to(self.device)
-        self.input_embedding_decoder = nn.Linear(2, dim_model).to(self.device)
+        self.input_embedding = nn.Sequential(
+                nn.Linear(input_dim, dim_model),
+                nn.LayerNorm(dim_model)
+            ).to(self.device)
+        # self.input_embedding_decoder = nn.Linear(output_dim, dim_model).to(self.device)
+
+        self.input_embedding_decoder = nn.Sequential(
+                nn.Linear(output_dim, dim_model),
+                nn.LayerNorm(dim_model)
+            ).to(self.device)
         # Positional encoding
         self.positional_encoding = self.create_positional_encoding(max_len, dim_model).to(self.device)
         
@@ -72,8 +80,12 @@ class TimeSeriesTransformer(nn.Module):
             norm=nn.LayerNorm(dim_model),
         ).to(self.device)
         
+        
         # Output projection
         self.output_projection = nn.Linear(dim_model, output_dim).to(self.device)
+        nn.init.xavier_uniform_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
+
     
     def create_positional_encoding(self, max_len, d_model):
         # Create positional encoding as in the original transformer paper
@@ -97,126 +109,47 @@ class TimeSeriesTransformer(nn.Module):
         src_len = src.shape[1]
         src_embedded = src_embedded + self.positional_encoding[:, :src_len, :]
         assert torch.isfinite(src_embedded).all(), 'src_embedded contains NaN'
-        # src_embedded = src_embedded.permute(1,0,2)
-        # # Create source mask if not provided
-        # if src_mask is None:
-        #     # For encoder, typically we want to allow full attention for observed trajectory
-        #     src_mask = self.generate_square_subsequent_mask(src_len).to(self.device)
-        # print("mask dtype, device:", src_mask.dtype, src_mask.device)
-        # should print tensor([-inf, 0.]) 
-        # print("rows all -inf? ", (src_mask == float('-inf')).all(dim=1))
-        # Pass through the encoder
         memory = self.transformer_encoder(src_embedded, mask = src_mask)
-        # print(f"memory NaN")
-        # x = src_embedded
-        # for i, layer in enumerate(self.transformer_encoder.layers):
-        #     x = layer(x, 
-        #         src_mask=src_mask,             # ← make sure you feed it here
-        #         src_key_padding_mask=None)            # or layer(x) if you’re not using a mask
-        #     if not torch.isfinite(x).all():
-        #         print(f"NaNs appeared after encoder layer {i}")
-        #         # attn_out, _ = layer.self_attn(x,x,x,
-        #         #     attn_mask=src_mask,
-        #         #     need_weights=False,
-        #         # )
-        #         x = src_embedded
-        #         d = layer.self_attn.embed_dim
-        
-        #         Q = linear(x,
-        #         layer.self_attn.in_proj_weight[:d],
-        #         layer.self_attn.in_proj_bias[:d])
-        #         K = linear(x,
-        #                 layer.self_attn.in_proj_weight[d:2*d],
-        #                 layer.self_attn.in_proj_bias[d:2*d])
-        #         V = linear(x,
-        #                 layer.self_attn.in_proj_weight[2*d:3*d],
-        #                 layer.self_attn.in_proj_bias[2*d:3*d])
-
-        #         # raw scores
-        #         scores = (Q @ K.transpose(-2, -1)) / math.sqrt(d)
-        #         scores_masked = scores
-        #         probs = softmax(scores_masked, dim=-1)
-        #         assert torch.isfinite(probs).all(), f"Layer {i} probs has NaNs!"
-        #         assert torch.isfinite(V).all(), f"Layer {i} V has NaNs!"
-
-        #         attn_out = probs @ V  # (B,S,D)
-        #         assert torch.isfinite(attn_out).all(), f"Layer {i} — attn_out has NaNs!"
-
-        #         # 2) Residual + LayerNorm1
-        #         x1 = x + layer.dropout1(attn_out)
-        #         assert torch.isfinite(x1).all(), f"Layer {i} — post‐attn residual has NaNs!"
-        #         x1 = layer.norm1(x1)
-        #         assert torch.isfinite(x1).all(), f"Layer {i} — after norm1 has NaNs!"
-
-        #         # 3) Feed‐forward block
-        #         ffn1 = layer.linear1(x1)
-        #         assert torch.isfinite(ffn1).all(), f"Layer {i} — linear1 output has NaNs!"
-        #         ffn2 = layer.activation(ffn1)
-        #         assert torch.isfinite(ffn2).all(), f"Layer {i} — activation output has NaNs!"
-        #         ffn2 = layer.dropout(ffn2)
-        #         ffn2 = layer.linear2(ffn2)
-        #         assert torch.isfinite(ffn2).all(), f"Layer {i} — linear2 output has NaNs!"
-
-        #         # 4) Residual + LayerNorm2
-        #         x2 = x1 + layer.dropout2(ffn2)
-        #         assert torch.isfinite(x2).all(), f"Layer {i} — post‐FFN residual has NaNs!"
-        #         x = layer.norm2(x2)
-        #         assert torch.isfinite(x).all(), f"Layer {i} — after norm2 has NaNs!"
-                
-
         for name, p in self.transformer_encoder.named_parameters():
             if not torch.isfinite(p).all():
                 print(name, "has NaNs or Infs!")
-        # memory = memory.permute(1,0,2) # [batch_size, src_len, dim_model]
         assert torch.isfinite(memory).all(), 'memory contains NaN'
         
-        # If no target is provided, we're in inference mode
         if tgt is None:
-            # For trajectory prediction, we need to generate future points autoregressively
-            # Initialize with the last observed point or a learned query token
+           
             pred_horizon = 60  # Define this in your model class
-            
-            # Option 1: Use the last observed point as the start of prediction
-            # Assuming output shape should match input features, adjust as needed
+            decoder_input = src # shape: [batch_size, 1, features]
             predictions = []
-            current_input = src[:, -1:, :2]  # Take the last observed point [batch_size, 1, features]
-            
-            # Decode autoregressively for the prediction horizon
+
             for i in range(pred_horizon):
-                # Embed the current input
-                decoder_input = self.input_embedding_decoder(current_input)
                 
-                # Add positional encoding (position = src_len + i)
-                position = src_len + i
-                decoder_input = decoder_input + self.positional_encoding[:, position:position+1, :]
+                if i == 0:
+                    current_input = decoder_input
+                else:
+                    decoder_input = decoder_input[:, :-1, :]
+                      # Use the last time step as initial input
+                    current_input = torch.cat([decoder_input, *predictions], dim=1)
+                decoder_input_emb = self.input_embedding_decoder(current_input)
                 
-                # No need for tgt_mask as we're predicting one step at a time
-                # Pass through decoder
+                # Add positional encoding (for entire decoder input so far)
+                pos_enc = self.positional_encoding[:, src_len:src_len + decoder_input_emb.size(1), :]
+                decoder_input_emb = decoder_input_emb + pos_enc
+
                 decoder_output = self.transformer_decoder(
-                    decoder_input, memory, 
-                    tgt_mask=None,
+                    decoder_input_emb, memory,
+                    tgt_mask=None,  
                     memory_mask=memory_mask
                 )
-                if torch.isnan(decoder_output).any():
-                    print("nan in decoder_output")
-            
-                # Project to output dimension
-                next_point = self.output_projection(decoder_output[:, -1, :])
-                next_point = next_point.view(src.shape[0], 1, -1)  # Reshape to [batch_size, 1, output_features]
                 
-                if torch.isnan(next_point).any():
-                    print("nan in next_point")
+                next_point = self.output_projection(decoder_output[:, -1:, :]).view(src.shape[0], 1, -1)
                 predictions.append(next_point)
-                
-                # Update current_input for next iteration
-                current_input = next_point
                 
             # Concatenate all predictions
             return torch.cat(predictions, dim=1)  # [batch_size, pred_horizon, output_features]
         
         # Teacher forcing mode with provided targets
         else:
-            # tgt = tgt.permute(1,0,2)  # [batch_size, input_dim, tgt_len]
+           
             # Embed target and add positional encoding
             tgt_embedded = self.input_embedding_decoder(tgt)
             tgt_len = tgt.shape[1]
@@ -232,6 +165,8 @@ class TimeSeriesTransformer(nn.Module):
             #     tgt_mask = self.generate_square_subsequent_mask(tgt_len).to(self.device)
             # assert not torch.isnan(tgt_mask).any(), 'tgt_mask contains NaN'
             # tgt_embedded = tgt_embedded.permute(1,0,2)
+            tgt_mask = torch.triu(torch.ones(tgt_len, tgt_len), diagonal=1).bool().to(self.device)
+
             output = self.transformer_decoder(
                 tgt_embedded[:, :, :], memory, 
                 tgt_mask=tgt_mask, 
@@ -325,8 +260,8 @@ class TrajectoryDatasetTrain(Dataset):
     def __getitem__(self, idx):
         scene = self.data[idx]
         # Getting 50 historical timestamps and 60 future timestamps
-        hist = scene[:, :50, :].copy()    # (agents=50, time_seq=50, 6)
-        future = torch.tensor(scene[0, 50:, :2].copy(), dtype=torch.float32)  # (60, 2)
+        hist = scene[:, :50, :5].copy()    # (agents=50, time_seq=50, 6)
+        future = torch.tensor(scene[0, 50:, :5].copy(), dtype=torch.float32)  # (60, 2)
         
         # Data augmentation(only for training)
         if self.augment:
@@ -337,7 +272,9 @@ class TrajectoryDatasetTrain(Dataset):
                 # Rotate the historical trajectory and future trajectory
                 hist[..., :2] = hist[..., :2] @ R
                 hist[..., 2:4] = hist[..., 2:4] @ R
-                future = future @ R
+                future[..., :2] = future[..., :2] @ R
+                future[..., 2:4] = future[..., 2:4] @ R
+
             if np.random.rand() < 0.5:
                 hist[..., 0] *= -1
                 hist[..., 2] *= -1
@@ -346,90 +283,85 @@ class TrajectoryDatasetTrain(Dataset):
         # Use the last timeframe of the historical trajectory as the origin
         origin = hist[0, 49, :2].copy()  # (2,)
         hist[..., :2] = hist[..., :2] - origin
-        future = future - torch.Tensor(origin)
+
+        future[..., :2] = future[..., :2] - origin
 
         # Normalize the historical trajectory and future trajectory
         hist[..., :4] = hist[..., :4] / self.scale
-        future = future / self.scale
+        future[..., :4] = future[..., :4] / self.scale
+       
 
-        #normalize the last 2 features with mean /var
-        # hist= (hist- hist.mean()) / hist.std()
-        # future = (future - hist[..., :2].mean()) / hist[..., :2].std()
+        # Create a Data object for PyTorch Geometric
 
-        
-
+         
         data_item = Data(
             x=torch.tensor(hist, dtype=torch.float32),
             y=future.type(torch.float32),
             origin=torch.tensor(origin, dtype=torch.float32).unsqueeze(0),
             scale=torch.tensor(self.scale, dtype=torch.float32),
         )
-        if hist[0] is np.nan:
-            print("nan in hist")
-        if future[0] is np.nan:
-            print("nan in future")
+
         return data_item
-    
 
 def evaluate_model(model, val_loader, args):
-        model.eval()
-        total_loss = 0
-        total_loss_norm = 0
-        criterion = nn.MSELoss()
+    model.eval()
+    total_loss = 0
+    total_loss_norm = 0
+    val_mae = 0
+    criterion = nn.MSELoss()
 
-        sample_input = None
-        sample_pred = None
-        sample_target = None
+    sample_input = None
+    sample_pred = None
+    sample_target = None
+    
+    with torch.no_grad():
+        val_mae = 0
+        for batch_idx, batch in enumerate(val_loader):
+            batch = batch.to(args.device)
+            batch_x = batch.x
+            batch_x = batch_x.reshape(-1, 50, 50, 5)[:, 0, :, :2]
+            context = batch_x.clone()            # (N, L_ctx, 2)
+            y = batch.y.view(batch.num_graphs, 60, 5)[...,:2]
+            # 2) container for this batch’s 60‐step forecasts
+            # all_steps = []
+            pred_norm = model(batch_x, tgt=None)
+            # n_iters = math.ceil(60 / (args.output_dim/args.seq_dim))
+            # for _ in range(n_iters):
+            #     out_norm = model(context)               # (N, 11*2)
+            #     out_norm = out_norm.view(-1, int(args.output_dim/args.seq_dim), args.seq_dim)     # (N, 11, 2)
 
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
-                batch = batch.to(args.device)
-                batch_x = batch.x
-                batch_x = batch_x.reshape(-1, 50, 50, 5)[:, 0, :, :]
-                ground_truth = batch.y.reshape(-1, 60, 2)[:, :, :]  # Don't drop last position
-                start_token = batch_x[:, -1, :2].reshape(-1,1,2)  # Shape: [batch_size, 1, feature_dim]
-                tgt_input = ground_truth[:,  :-1, :]  # Shape: [batch_size, seq_len-1, feature_dim]
-                decoder_input = torch.cat([start_token, tgt_input], dim=1)
+            #     new10 = out_norm.reshape(batch_x.shape[0], 60, args.seq_dim)          # (N, 10, 2)
+            #     all_steps.append(new10)
+            #     context = torch.cat([context[:, int(args.output_dim/args.seq_dim):, :], out_norm[context.shape[0],int(args.output_dim/args.seq_dim) , :]], dim=1)
                 
-                pred = model(batch_x).reshape(-1,60,2)
-                y = batch.y.view(batch.num_graphs, 60, 2)
-
-                if batch_idx == 0 and sample_input is None:
-                    sample_input = batch.x[0].cpu().numpy()
-                    sample_pred = pred[0].cpu().numpy()
-                    sample_target = y[0].cpu().numpy()
-                pred_unnorm = pred * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
-                y_unnorm = y * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
-                total_loss_norm += criterion(pred, y).item()
-                # val_mae += nn.L1Loss()(pred_unnorm, y_unnorm).item()
-                # total_loss += criterion(pred_unnorm, y_unnorm).item()
+            # pred_norm = torch.cat(all_steps, dim=1)      # (N, 60, 2)
+            pred_unnorm = pred_norm[..., :2] * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
+            y_unnorm = torch.stack(torch.split(batch.y[..., :2], 60, dim=0), dim=0) * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
+            
+            # y_unnorm = y[..., :2] * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
+            total_loss_norm += criterion(pred_norm, y).item() #norm mse
+            val_mae += nn.L1Loss()(pred_unnorm, y_unnorm).item() #unnorm mae
+            total_loss += criterion(pred_unnorm, y_unnorm).item() #unnorm mse
 
         avg_loss_norm = total_loss_norm / len(val_loader)
+        avg_val_mae = val_mae / len(val_loader)
         # tqdm.write('unnorm val loss', avg_loss_norm)
-        # avg_loss = total_loss / len(val_loader)
-        return avg_loss_norm, sample_input, sample_pred, sample_target
-    
+        avg_loss = total_loss / len(val_loader)
+        return avg_loss_norm, avg_loss, avg_val_mae
+
 
 def train_model(model, train_loader, val_loader, args):
 
     start_time = time.time()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay = args.weight_decay)
     
-    # Exponential decay scheduler
-    # lr_scheduler_val = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    # optimizer,
-    # mode='min',
-    # factor=0.5,
-    # patience=args.patience,
-    # min_lr=args.lr
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # optimizer, 
+    # max_lr=args.lr,
+    # total_steps=args.nepochs * len(train_loader),
+    # pct_start=0.001  # 10% warmup
     # )
-     # Exponential decay scheduler
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer, 
-    max_lr=args.lr,
-    total_steps=args.nepochs * len(train_loader),
-    pct_start=0.001  # 10% warmup
-    )
+    scheduler =torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
     early_stopping_patience = args.patience
     best_val_loss = float('inf')
     no_improvement = 0
@@ -453,10 +385,10 @@ def train_model(model, train_loader, val_loader, args):
             batch_x = batch.x
             assert torch.isfinite(batch_x).all(), 'batch_x contains NaN'
             
-            batch_x = batch_x.reshape(-1, 50, 50, args.seq_dim)[:, 0, :, :]
-            ground_truth = batch.y.reshape(-1, 60, 2)[:, :, :] 
-            start_token = batch_x[:, -1, :2].reshape(-1,1,2)  # Shape: [batch_size, 1, 2]
-            tgt_input = ground_truth[:,  :-1, :]  # Shape: [batch_size, seq_len-1, 2]
+            batch_x = batch_x.reshape(-1, 50, 50, 5)[:, 0, :, :2]
+            ground_truth = batch.y.reshape(-1, 60, 5)[:, :, :2] 
+            start_token = batch_x[:, -1, :].reshape(-1,1,2)  
+            tgt_input = ground_truth[:,  :-1, :]  
             decoder_input = torch.cat([start_token, tgt_input], dim=1)
             assert torch.isfinite(decoder_input).all(), 'decoder_input contains NaN'
             pred = model(batch_x, decoder_input)
@@ -464,7 +396,7 @@ def train_model(model, train_loader, val_loader, args):
             if pred.isnan().any():
                 print(f"nan in pred {epoch}")
                 break
-            y = batch.y.view(batch.num_graphs, 60, 2)
+            y = batch.y.view(batch.num_graphs, 60, 5)[:, :, :2] 
 
             optimizer.zero_grad()
             loss = criterion(pred, y)
@@ -472,13 +404,13 @@ def train_model(model, train_loader, val_loader, args):
             # for name, p in model.named_parameters():
             #     if p.grad is not None and not torch.isfinite(p.grad).all():
             #         raise RuntimeError(f"Non-finite gradient in {name}")
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             # print(optimizer.param_group s[0]['lr'])
-            scheduler.step()
+            
             # print(optimizer.param_groups[0]['lr'])
-            pred_unnorm = pred * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
-            y_unnorm = y * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
+            pred_unnorm = pred[...,:2] * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
+            y_unnorm = y[...,:2] * batch.scale.view(-1, 1, 1) + batch.origin.unsqueeze(1)
             
             train_mse += criterion(pred_unnorm, y_unnorm).item()
             
@@ -487,15 +419,15 @@ def train_model(model, train_loader, val_loader, args):
             # loss_val = criterion(output[:,0,:], tgt.reshape(-1,50,66)[:,0,:].to(self.device))
         
         
-        eval_loss_norm, sample_input, sample_pred, sample_target = evaluate_model(model, val_loader, args)
+        eval_loss_norm, eval_loss, eval_loss_mae = evaluate_model(model, val_loader, args)
         # lr_scheduler_val.step(eval_loss_norm)
-        val_losses.append(eval_loss_norm)
-        tqdm.write(f'Val loss in epoch {epoch} is {eval_loss_norm:.4f}',)
-
+        val_losses.append(eval_loss) #unnorm
+        tqdm.write(f'Val loss in epoch {epoch} is {eval_loss:.4f}',) #unnorm
+        scheduler.step()
         avg_loss = total_loss / len(train_loader)
-        avg_mse = train_mse / len(train_loader)
-        train_losses.append(avg_mse)
-        tqdm.write(f'Epoch {epoch}, train Loss: {avg_mse:.4f}')
+        avg_mse = train_mse / len(train_loader) 
+        train_losses.append(avg_mse) #unnorm
+        tqdm.write(f'Epoch {epoch}, train Loss: {avg_mse:.4f}') #unnorm
         
         all_loss = [train_losses, val_losses]    
 
@@ -564,7 +496,7 @@ def read_data():
     torch.manual_seed(251)
     np.random.seed(42)
     
-    scale = 7.0
+    scale = 10.0
     
     N = len(train_data)
     val_size = int(0.1 * N)
@@ -634,11 +566,11 @@ if __name__ == "__main__":
     parser.add_argument('-data_name', '--data_name', type=str, metavar='<size>', default='train',
                 help='which data to work on.')
     
-    parser.add_argument('-pretrained', '--pretrained', action='store_true', default=True,
+    parser.add_argument('-pretrained', '--pretrained', action='store_true', default=False,
                         help='Load pretrained model.')
     #world transformer arguments
 
-    parser.add_argument('-seq_dim', '--seq_dim', type=int, metavar='<dim>', default=5,
+    parser.add_argument('-seq_dim', '--seq_dim', type=int, metavar='<dim>', default=2,
                         help='Specify the sequence dimension.')
     parser.add_argument('-output_dim', '--output_dim', type=int, metavar='<dim>', default=2,
                         help='Specify the sequence dimension.')
@@ -646,21 +578,21 @@ if __name__ == "__main__":
                         help='Specify the batch size.') 
     parser.add_argument('-nepochs', '--nepochs', type=int, metavar='<epochs>', default=2, #change
                         help='Specify the number of epochs to train for.')
-    parser.add_argument('-encoder_size', '--encs', type=int, metavar='<size>', default=2,
+    parser.add_argument('-encoder_size', '--encs', type=int, metavar='<size>', default=1,
                 help='Set the number of encoder layers.') 
     parser.add_argument('-decoder_size', '--decs', type=int, metavar='<size>', default=1,
                 help='Set the number of decoder layers.')
-    parser.add_argument('-lr', '--lr', type=float, metavar='<size>', default=0.0001,
+    parser.add_argument('-lr', '--lr', type=float, metavar='<size>', default=0.002,
                         help='Specify the learning rate.')
-    parser.add_argument('-weight_decay', '--weight_decay', type=float, metavar='<size>', default=0.00005,
+    parser.add_argument('-weight_decay', '--weight_decay', type=float, metavar='<size>', default=0.0001,
                         help='Specify the weight decay.')
-    parser.add_argument('-encoder_dropout', '--encoder_dropout', type=float, metavar='<size>', default=0.5,
+    parser.add_argument('-encoder_dropout', '--encoder_dropout', type=float, metavar='<size>', default=0.3,
                 help='Set the tunable dropout.')
-    parser.add_argument('-decoder_dropout', '--decoder_dropout', type=float, metavar='<size>', default=0.5,
+    parser.add_argument('-decoder_dropout', '--decoder_dropout', type=float, metavar='<size>', default=0.3,
                 help='Set the tunable dropout.')
-    parser.add_argument('-dim_model', '--dim_model', type=int, metavar='<size>', default=512,
+    parser.add_argument('-dim_model', '--dim_model', type=int, metavar='<size>', default=256, #must be at least 256
                 help='Set the number of encoder layers.')
-    parser.add_argument('-patience', '--patience', type=int, default=15,
+    parser.add_argument('-patience', '--patience', type=int, default=20,
                 help='Set the patience for early stopping.')
     parser.add_argument('-path', '--path', type=str, metavar='<cohort>', 
                         default='',
