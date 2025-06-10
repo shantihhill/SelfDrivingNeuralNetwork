@@ -58,7 +58,7 @@ preds6 = enc_mlp6.drop(columns=['index'])
 preds7 = enc_mlp7.drop(columns=['index'])
 preds8 = enc_mlp8.drop(columns=['index'])
 preds9 = enc_mlp9.drop(columns=['index'])
-preds10 = enc_mlp10.drop(columns=['index'])
+# preds10 = enc_mlp10.drop(columns=['index'])
 
 
 
@@ -72,13 +72,11 @@ loss5 = 8.1407
 loss6 = 8.7819
 loss7 = 8.3382
 # loss8 = 8.0413
-loss8 = 8.3260 #changed from 0.3260
+loss8 = 8.3260 
 # loss9 = 8.2146
-loss9 = 8.6652 #give higher weight
+loss9 = 8.6652 
 # loss9 = 8.0652 #new
-loss10 = 8.2146
-
-
+# loss10 = 8.2146
 
 
 # Inverse losses for weighting
@@ -91,7 +89,7 @@ inv_loss6 = 1.0/ loss6
 inv_loss7 = 1.0/ loss7
 inv_loss8 = 1.0/ loss8
 inv_loss9= 1.0/ loss9
-inv_loss10= 1.0/ loss10
+# inv_loss10= 1.0/ loss10
 
 weight_sum = (
                 inv_loss1 +
@@ -102,8 +100,8 @@ weight_sum = (
                     inv_loss6 +
                     inv_loss7 +
                     inv_loss8 +
-                    inv_loss9 +
-                    inv_loss10
+                    inv_loss9 
+                    # inv_loss10
                     )
 
 # Weighted average
@@ -116,8 +114,8 @@ weighted_preds = (
                          preds6 * inv_loss6 +
                          preds7 * inv_loss7 +
                          preds8 * inv_loss8 +
-                         preds9 * inv_loss9 +
-                        preds10 * inv_loss10 
+                         preds9 * inv_loss9 
+                        # preds10 * inv_loss10 
 
                          ) / weight_sum
 
@@ -133,4 +131,4 @@ assert ens_df['index'].is_unique, "Index column has duplicates!"
 assert len(ens_df) == len(base_index), "Length mismatch!"
 
 # Save the correct format
-ens_df.to_csv("submission_ensemble_10_mlp_v1.csv", index=False)
+ens_df.to_csv("submission_ensemble_9_mlp_v1.csv", index=False)
